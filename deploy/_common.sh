@@ -41,6 +41,21 @@ drop_notion_secrets() {
   unset NOTION_TOKEN NOTION_COURSE_TOKEN
 }
 
+# 担当プロセスの名前。本体に組み込みの担当と、担当プロセスを持つモジュール（module.toml に [process] がある。
+# 組み込みの modules/ と、利用者のフォルダの modules/ の両方）。起動の前に要るので、Python を使わずに探す
+CORE_AGENTS=(research course work voice)
+module_processes() {
+  local file
+  for file in "${REPO:-}"/modules/*/module.toml(N) "${KEI_AGENT_HOME:-$HOME/.config/kei-agent}"/modules/*/module.toml(N); do
+    if grep -q '^\[process\]' "$file"; then
+      print -r -- "${file:h:t}"
+    fi
+  done
+}
+agent_names() {
+  print -r -- $CORE_AGENTS $(module_processes)
+}
+
 # 仮想環境の Python で直に起動する。`uv run` だと uv が親として残り、プロセスごとに 20MB ほど余分に使う。
 # 起動の前に lock のとおりに依存をそろえる（--inexact: ほかのグループのものは消さない。uv run と同じ）
 launch() {

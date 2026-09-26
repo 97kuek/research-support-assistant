@@ -7,30 +7,28 @@
 #         deploy/install.sh research      研究エージェント（A2A サーバー）を登録
 #         deploy/install.sh research remove 研究エージェントの登録を外す
 #         deploy/install.sh work          仕事エージェント（A2A サーバー）を登録
-#         deploy/install.sh knowledge     知識エージェント（A2A サーバー）を登録
+#         deploy/install.sh knowledge     知識エージェント（担当プロセスを持つモジュール）を登録
 #         deploy/install.sh voice         声のレイヤ（A2A サーバー＋マイク）を登録
 #         deploy/install.sh notion-gateway Notion ゲートウェイ（Notion に届く唯一の口）を登録
 #         deploy/install.sh <名前> print  登録する plist を表示するだけ（登録はしない）
 set -eu
 
 # 引数に course / research などを付けると、そのプロセスのほうを登録する。
-# 担当（research / course / work / knowledge / voice）は、どれも deploy/run-agent.sh <名前> で起動する
-# （担当を足すときは、あちらの case にも足す）。plist はどれも com.kei-agent.plist.template から作る
-case "${1:-}" in
-  course|research|work|knowledge|voice)
-    NAME="$1" SCRIPT="run-agent.sh" ARGUMENT="$1" LOG="$1-launchd.log"
-    shift
-    ;;
-  notion-gateway)
-    NAME="$1" SCRIPT="run-notion-gateway.sh" ARGUMENT="" LOG="notion-gateway-launchd.log"
-    shift
-    ;;
-  *)
-    NAME="assistant" SCRIPT="run.sh" ARGUMENT="" LOG="launchd.log"
-    ;;
-esac
-LABEL="com.kei-agent.$NAME"
+# 担当（本体に組み込みの担当と、担当プロセスを持つモジュール）は、どれも deploy/run-agent.sh <名前> で起動する。
+# 名前の一覧は deploy/_common.sh の agent_names。plist はどれも com.kei-agent.plist.template から作る
 REPO="${0:A:h:h}"
+source "$REPO/deploy/_common.sh"
+agents=($(agent_names))
+if [[ "${1:-}" == notion-gateway ]]; then
+  NAME="$1" SCRIPT="run-notion-gateway.sh" ARGUMENT="" LOG="notion-gateway-launchd.log"
+  shift
+elif [[ -n "${1:-}" && ${agents[(Ie)$1]} -gt 0 ]]; then
+  NAME="$1" SCRIPT="run-agent.sh" ARGUMENT="$1" LOG="$1-launchd.log"
+  shift
+else
+  NAME="assistant" SCRIPT="run.sh" ARGUMENT="" LOG="launchd.log"
+fi
+LABEL="com.kei-agent.$NAME"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/Library/Logs/kei-agent"
 DOMAIN="gui/$(id -u)"

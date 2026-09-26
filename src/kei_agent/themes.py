@@ -111,7 +111,7 @@ def resolve(config: Config, channel_name: str) -> Workspace:
     if channel_name in config.course_channels:
         # 作業場は大学エージェントの claude が使う（本体はここで claude を動かさない）
         return Workspace(channel_name, ChannelKind.COURSE, config.course_root)
-    if channel_name in config.knowledge_channels:
+    if channel_name in config.module_channels.get("knowledge", ()):
         return Workspace(channel_name, ChannelKind.KNOWLEDGE, None)
     if channel_name in config.overview_channels:
         return Workspace(channel_name, ChannelKind.OVERVIEW, config.overview_dir)

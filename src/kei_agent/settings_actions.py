@@ -124,7 +124,7 @@ class SettingsActions:
             await self.slack.views_open(trigger_id=body.get("trigger_id"),
                                         view=home.build_add_domain_modal(self._theme_names()))
             return
-        elif kind == home.TIME_ACTION and name in settings.SCHEDULE_NAMES:
+        elif kind == home.TIME_ACTION and name in settings.schedule_names(self.config):
             # 時刻を消されたら変えずに、表示だけ元の時刻に戻す
             selected = action.get("selected_time") or ""
             if HHMM.match(selected):
@@ -133,7 +133,7 @@ class SettingsActions:
         elif kind == home.SCHEDULES_ACTION:
             # チェックの付いたものだけを動かす（付け外ししたものだけ書き換える）
             chosen = {option.get("value") for option in action.get("selected_options") or []}
-            for schedule in settings.SCHEDULE_NAMES:
+            for schedule in settings.schedule_names(self.config):
                 hhmm, enabled = settings.schedule_setting(self.config, self.store, schedule)
                 if (schedule in chosen) != enabled:
                     settings.set_schedule(self.store, schedule, hhmm, schedule in chosen)
@@ -144,7 +144,7 @@ class SettingsActions:
             if listen != settings.listening_enabled(self.store):
                 settings.set_listening(self.store, listen)
                 self.notify_listening(listen)
-        elif kind == home.PROVIDER_ACTION and name in home.AGENT_LABELS:
+        elif kind == home.PROVIDER_ACTION and name in home.agent_labels(self.config):
             provider = ((action.get("selected_option") or {}).get("value") or "")
             if provider:
                 settings.set_agent_provider(self.store, name, provider)

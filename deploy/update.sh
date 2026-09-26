@@ -30,7 +30,7 @@ echo "反映する版: $commit $(git log -1 --format=%s)"
 uv sync --frozen --inexact --all-groups --quiet
 
 # plist が変わったものだけ登録し直す（kickstart では前の plist のまま動くため）
-for name in assistant course research work knowledge voice notion-gateway; do
+for name in assistant $(agent_names) notion-gateway; do
   args=()
   if [[ "$name" != assistant ]]; then
     args=("$name")

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import time
 
-from kei_agent import settings
+from kei_agent import modules, settings
 from kei_agent.config import Config
 from kei_agent.slack_text import format_duration
 from kei_agent.store import Store
@@ -21,16 +21,21 @@ SCHEDULES_ACTION = "kei_agent_home_schedules"
 VOICE_ACTION = "kei_agent_home_voice"
 REMOVE_DOMAIN_ACTION = "kei_agent_home_remove_domain"
 ADD_DOMAIN_ACTION = "kei_agent_home_add_domain"
-AGENT_LABELS = {"research": "研究", "course": "大学", "work": "仕事", "knowledge": "知識",
-                "router": "振り分け・Daily", "self_fix": "自己改善"}
-# 定期実行のチェックに出す短い名前（時刻の行は settings.SCHEDULE_LABELS）
-SCHEDULE_SHORT = {"literature": "先行研究", "reading": "読みもの", "daily": "Daily", "review": "レトプラ",
-                  "night": "夜間", "maintenance": "保守"}
+# 本体の実行役の表示名。モジュールの実行役は module.toml の label（agent_labels）
+CORE_AGENT_LABELS = {"research": "研究", "course": "大学", "work": "仕事"}
+CROSS_AGENT_LABELS = {"router": "振り分け・Daily", "self_fix": "自己改善"}
 VOICE_OPTIONS = {"voice": "知らせる", "listen": "聞く（マイク）"}
 # 決まった時刻の処理は、スレッドを持たない実行として記録される
 TRIGGER_LABELS = {"message": "依頼", "job": "ジョブの結果", "domain": "接続先の返事", "voice": "声からの依頼",
-                  "night": "夜間の Task", "handoff": "引き継ぎ", "literature": "先行研究の新着",
-                  "daily": "Daily", "review": "振り返り"}
+                  "night": "夜間の Task", "handoff": "引き継ぎ", "daily": "Daily", "review": "振り返り"}
+
+
+def agent_labels(config: Config) -> dict[str, str]:
+    """App Home で AI を選ぶ実行役と表示名（本体の担当、使うモジュール、横断の係の順）。"""
+    labels = dict(CORE_AGENT_LABELS)
+    labels.update({spec.name: spec.label for spec in modules.enabled(config.modules) if spec.actor})
+    labels.update(CROSS_AGENT_LABELS)
+    return labels
 
 
 def _mrkdwn(text: str) -> dict:
@@ -63,12 +68,12 @@ def _checkboxes(action_id: str, options: dict[str, str], chosen: set[str]) -> di
     return element
 
 
-def _now_working(store: Store, now: float | None = None) -> list[str]:
+def _now_working(config: Config, store: Store, now: float | None = None) -> list[str]:
     """いま動いている依頼、走っているジョブ、返事待ちのスレッドを、短い行にして返す。"""
     now = time.time() if now is None else now
     lines = []
     for run in store.open_runs():
-        kind = TRIGGER_LABELS.get(run["trigger"], run["trigger"])
+        kind = TRIGGER_LABELS.get(run["trigger"]) or settings.schedule_label(config, run["trigger"])
         lines.append(f"⏳ *#{run['channel_name']}* {kind}（{format_duration(now - run['started_at'])}）")
     for job in store.active_jobs():
         started = "実行中" if job.status == "running" else "順番待ち"
@@ -83,7 +88,7 @@ def build_home(config: Config, store: Store, theme_names: list[str], is_owner: b
     if not is_owner:
         return {"type": "home", "blocks": [_mrkdwn("設定を変えられるのは依頼者だけです")]}
 
-    working = _now_working(store)
+    working = _now_working(config, store)
     blocks: list[dict] = [
         {"type": "header", "text": {"type": "plain_text", "text": "Kei Agent"}},
         {"type": "section", "text": {"type": "mrkdwn", "text": "*動いているもの*"},
@@ -92,7 +97,7 @@ def build_home(config: Config, store: Store, theme_names: list[str], is_owner: b
         {"type": "divider"},
         _mrkdwn("*AI*"),
     ]
-    for agent, label in AGENT_LABELS.items():
+    for agent, label in agent_labels(config).items():
         provider = settings.agent_profile(config, store, agent).provider
         select = {"type": "static_select", "action_id": f"{PROVIDER_ACTION}:{agent}",
                   "placeholder": {"type": "plain_text", "text": "未選択"},
@@ -101,20 +106,22 @@ def build_home(config: Config, store: Store, theme_names: list[str], is_owner: b
             select["initial_option"] = _option(provider.title(), provider)
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": label}, "accessory": select})
 
-    running = {name for name in settings.SCHEDULE_NAMES if settings.schedule_setting(config, store, name)[1]}
+    names = settings.schedule_names(config)
+    running = {name for name in names if settings.schedule_setting(config, store, name)[1]}
     blocks += [
         {"type": "divider"},
         _mrkdwn("*定期実行*"),
         {"type": "actions", "elements": [
-            _checkboxes(SCHEDULES_ACTION, {name: SCHEDULE_SHORT[name] for name in settings.SCHEDULE_NAMES}, running)]},
+            _checkboxes(SCHEDULES_ACTION, {name: settings.schedule_label(config, name, short=True) for name in names},
+                        running)]},
     ]
-    for name in settings.SCHEDULE_NAMES:
+    for name in names:
         hhmm, _enabled = settings.schedule_setting(config, store, name)
         picker = {"type": "timepicker", "action_id": f"{TIME_ACTION}:{name}",
                   "placeholder": {"type": "plain_text", "text": "時刻"}}
         if hhmm:
             picker["initial_time"] = hhmm
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": settings.SCHEDULE_LABELS[name]},
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": settings.schedule_label(config, name)},
                        "accessory": picker})
 
     voice = {name for name, on in (("voice", settings.voice_enabled(store)),

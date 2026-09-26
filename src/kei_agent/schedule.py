@@ -23,6 +23,7 @@ from kei_agent import (
     digest,
     knowledge,
     maintenance,
+    modules,
     morning,
     research,
     settings,
@@ -51,7 +52,12 @@ from kei_agent.store import Store
 log = logging.getLogger(__name__)
 
 # 実行する順番。夜間の Task の結果を Daily に載せるため、night を先にする
-TASK_NAMES = ("night", "literature", "reading", "daily", "review", "maintenance")  # 実行する順。settings.SCHEDULE_NAMES と同じもの
+def task_names(config: Config) -> tuple[str, ...]:
+    """実行する順。同じ時刻なら、夜間の Task → モジュールの処理（朝の読みものなど）→ Daily → 振り返り → 保守。
+
+    夜間の Task とモジュールの処理の結果を、Daily と朝の一覧に載せるため。
+    """
+    return ("night", *(s.name for s in settings.module_schedules(config)), "daily", "review", "maintenance")
 # 夜間の Task は、朝に Mac が起きたときにも実行する
 NIGHT_CATCH_UP_HOURS = 12
 # 締切が近いものを知らせるために、カレンダーを見に行く間隔（秒）
@@ -159,7 +165,7 @@ class Scheduler:
         await self.catch_up_deferred(now.timestamp())
         pending = {(payload.get("name"), payload.get("day"))
                    for _, payload in self.store.pending_deferred("schedule")}
-        for name in TASK_NAMES:
+        for name in task_names(self.config):
             catch_up = NIGHT_CATCH_UP_HOURS if name == "night" else sched.catch_up_hours
             # Slack（App Home）で変えた時刻を毎回読み直す。止めている処理は空文字
             hhmm = settings.schedule_time(self.config, self.store, name)
@@ -196,9 +202,14 @@ class Scheduler:
         """定期処理が使う明示 provider。保守はモデルを使わない。"""
         if name == "maintenance":
             return None
-        actor = {"daily": "router", "review": "router", "literature": knowledge.AGENT,
-                 "reading": knowledge.AGENT}.get(name, "research")
-        return settings.selected_provider(self.config, self.store, actor)
+        if name in ("daily", "review"):
+            return settings.selected_provider(self.config, self.store, "router")
+        owner = next((spec for spec in modules.enabled(self.config.modules) if any(s.name == name for s in spec.schedules)),
+                     None)
+        if owner is not None:
+            # モジュールの処理は、そのモジュールの実行役の provider（AI を使わないモジュールなら要らない）
+            return settings.selected_provider(self.config, self.store, owner.name) if owner.actor else None
+        return settings.selected_provider(self.config, self.store, "research")
 
     def can_run(self, name: str, now: float, provider: str | None = None) -> bool:
         provider = self.task_provider(name) if provider is None else provider
@@ -366,7 +377,8 @@ class Scheduler:
     async def run_reading(self, day: str) -> dict:
         """朝の読みもの。共通ホームの「収集」ページの興味と情報源と、最近 👍 した記事を知識の担当に渡し、
         選ばれた記事を1記事 = 1投稿で出す（👍 とスレッドが記事ごとになる）。"""
-        name = self.config.knowledge_channels[0] if self.config.knowledge_channels else ""
+        channels = self.config.module_channels.get("knowledge", ())
+        name = channels[0] if channels else ""
         channel = (await self.assistant.channel_ids()).get(name) if name else None
         if channel is None:
             return {"status": "no_channel"}
@@ -712,7 +724,7 @@ class Scheduler:
         since = last["ran_at"] if last else now.timestamp() - 86400
         failed = []
         for row in self.store.schedule_runs_since(since):
-            label = settings.SCHEDULE_LABELS.get(row["name"])
+            label = settings.schedule_label(self.config, row["name"]) if row["name"] in settings.schedule_names(self.config) else None
             if label is None or (row["name"] == "daily" and row["day"] == today):
                 continue    # 定期処理でないもの、いま作っている Daily
             detail = json.loads(row["detail"] or "{}") or {}
@@ -846,8 +858,10 @@ async def _run_once(name: str, record: bool) -> None:
 
 def main() -> None:
     """定期処理を今すぐ1回動かす（確認用）。"""
+    from kei_agent.config import load_config
+
     parser = argparse.ArgumentParser(prog="kei-agent-schedule")
-    parser.add_argument("name", choices=TASK_NAMES)
+    parser.add_argument("name", choices=task_names(load_config()))
     parser.add_argument("--record", action="store_true", help="今日の分を実行済みとして記録する")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")

@@ -1,7 +1,7 @@
 """朝の読みものと、テーマごとの論文の新着（docs/architecture.md の「知識」）。
 
 集める・絞るのはプログラム（feeds.py）。選ぶ・要約するのは AI で、どちらも Web を使えない回
-（agent_policy.OFFLINE_USE_CASES）。外の文は材料としてプロンプトに入れるだけにする。
+（modules/knowledge/module.toml の offline = true）。外の文は材料としてプロンプトに入れるだけにする。
 一度候補にした記事・論文は、担当の作業場に SEEN_DAYS 日だけ覚えておき、もう出さない。
 """
 
@@ -22,7 +22,7 @@ from pathlib import Path
 from kei_agent import runner, themes
 from kei_agent.config import Config
 from kei_agent.model_json import json_object
-from kei_agent.model_policy import ModelPolicyError, UseCase, resolve, resolve_selected
+from kei_agent.model_policy import ModelPolicyError, resolve, resolve_selected
 from kei_agent.themes import Workspace
 from kei_agent_knowledge import feeds
 
@@ -42,6 +42,9 @@ MAX_PAPER_CANDIDATES = 30
 FETCH_WORKERS = 8
 # 朝の選別・要約の指示書（作業場に差し替える。質問に答えるときは prompts/knowledge.md）
 PROMPT_FILE = "knowledge-digest.md"
+# 用途の名前（modules/knowledge/module.toml の [use_cases]）。選ぶ回と要約する回は、どちらも Web を使わない
+PICK = "knowledge_pick"
+SUMMARY = "knowledge_summary"
 _ASCII_WORD = re.compile(r"^[0-9A-Za-z .+#-]+$")
 
 PICK_PROMPT = """次は、ここ2日に出た技術記事の候補です。依頼者の興味に合うものを {count} 件まで選んでください。
@@ -273,7 +276,7 @@ def _workspace(config: Config) -> Workspace:
     return replace(ws, system_prompt=config.prompt_file(PROMPT_FILE))
 
 
-async def _run(config: Config, store, use_case: UseCase, prompt: str, provider: str, key: str) -> dict:
+async def _run(config: Config, store, use_case: str, prompt: str, provider: str, key: str) -> dict:
     """Web を使えない回で AI を1回動かし、key を持つ JSON を返す。"""
     try:
         recipe = (resolve(AGENT, provider, use_case) if provider
@@ -347,7 +350,7 @@ async def reading(config: Config, store, payload: dict, *, provider: str = "", p
     await _say(progress, "候補を選んでいます")
     listing = "\n".join(f"{n}. [{e.source}] {e.title} — {e.summary[:200]}" for n, (e, _) in enumerate(found, 1))
     try:
-        data = await _run(config, store, UseCase.KNOWLEDGE_PICK, PICK_PROMPT.format(
+        data = await _run(config, store, PICK, PICK_PROMPT.format(
             count=count, interests=_interest_lines(interests), liked=liked.lines(), candidates=listing),
             provider, "picks")
         picks = list(dict.fromkeys(n - 1 for n in data.get("picks") or []
@@ -368,7 +371,7 @@ async def reading(config: Config, store, payload: dict, *, provider: str = "", p
         for n, ((e, hits), body) in enumerate(zip(chosen, bodies, strict=True), 1))
     notes: dict[int, dict] = {}
     try:
-        data = await _run(config, store, UseCase.KNOWLEDGE_SUMMARY, SUMMARY_PROMPT.format(
+        data = await _run(config, store, SUMMARY, SUMMARY_PROMPT.format(
             interests=_interest_lines(interests), articles=articles), provider, "items")
         notes = {int(x["n"]): x for x in data.get("items") or []
                  if isinstance(x, dict) and isinstance(x.get("n"), int)}
@@ -410,7 +413,7 @@ async def papers(config: Config, store, payload: dict, *, provider: str = "", pr
 
     await _say(progress, "前提と見比べています")
     listing = "\n\n".join(f"{p.id} — {p.title}\n{p.abstract}" for p in cands)
-    data = await _run(config, store, UseCase.KNOWLEDGE_SUMMARY, PAPER_PROMPT.format(
+    data = await _run(config, store, SUMMARY, PAPER_PROMPT.format(
         theme=theme, count=count, premises=premises or "（前提は書かれていない）", papers=listing),
         provider, "items")
     by_id = {p.id: p for p in cands}

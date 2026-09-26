@@ -1,7 +1,8 @@
-"""用途ごとの model / effort を一か所で決める。
+"""用途ごとの model / effort を決める。
 
 provider の選択は agent ごとに保持する。ここは選択された provider に対して、
 用途ごとの固定 recipe を返すだけであり、別 provider や上位 model への fallback はしない。
+コアの用途は下の表、モジュールの用途は module.toml の [use_cases] から引く。使ってよいモデルの一覧は、ここにだけ置く。
 """
 
 from __future__ import annotations
@@ -9,9 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from kei_agent.config import AGENT_PLUGINS, MODEL_ACTORS
+from kei_agent import modules
+from kei_agent.config import AGENT_PLUGINS, ConfigError, model_actors
 
-ACTORS = MODEL_ACTORS
 PROVIDERS = frozenset({"codex", "claude"})
 
 ALLOWED_MODELS = {
@@ -43,10 +44,6 @@ class UseCase(StrEnum):
     SELF_FIX_DESIGN = "self_fix_design"
     SELF_FIX_IMPLEMENTATION = "self_fix_implementation"
     SELF_FIX_REVIEW = "self_fix_review"
-    # 知識: 候補から選ぶ（軽い）、選んだ記事・論文の要約（材料は渡す）、質問に答える（Web を読む）
-    KNOWLEDGE_PICK = "knowledge_pick"
-    KNOWLEDGE_SUMMARY = "knowledge_summary"
-    KNOWLEDGE_ANSWER = "knowledge_answer"
     MANUAL_ASTRA = "manual_astra"
     MANUAL_FABLE = "manual_fable"
 
@@ -54,7 +51,8 @@ class UseCase(StrEnum):
 @dataclass(frozen=True)
 class ResolvedModel:
     actor: str
-    use_case: UseCase
+    # コアの用途は UseCase、モジュールの用途は名前の文字列（UseCase も文字列として比べられる）
+    use_case: UseCase | str
     provider: str
     model: str
     reasoning_effort: str
@@ -99,12 +97,6 @@ _RECIPES: dict[tuple[str, UseCase], tuple[str, str]] = {
     ("claude", UseCase.SELF_FIX_IMPLEMENTATION): ("claude-sonnet-5", "high"),
     ("codex", UseCase.SELF_FIX_REVIEW): ("gpt-6-sol", "medium"),
     ("claude", UseCase.SELF_FIX_REVIEW): ("claude-sonnet-5", "high"),
-    ("codex", UseCase.KNOWLEDGE_PICK): ("gpt-6-luna", "low"),
-    ("claude", UseCase.KNOWLEDGE_PICK): ("claude-haiku-4-5", ""),
-    ("codex", UseCase.KNOWLEDGE_SUMMARY): ("gpt-6-luna", "medium"),
-    ("claude", UseCase.KNOWLEDGE_SUMMARY): ("claude-sonnet-5", "medium"),
-    ("codex", UseCase.KNOWLEDGE_ANSWER): ("gpt-6-luna", "medium"),
-    ("claude", UseCase.KNOWLEDGE_ANSWER): ("claude-sonnet-5", "medium"),
 }
 
 _MANUAL = {
@@ -126,19 +118,52 @@ _ACTOR_USE_CASES = {
         UseCase.WORK_SINGLE_SOURCE, UseCase.WORK_CROSS_SOURCE, UseCase.WORK_DECIDE,
     }),
     "router": frozenset({UseCase.ROUTING, UseCase.OVERVIEW_DAILY, UseCase.OVERVIEW_PLAN}),
-    "knowledge": frozenset({UseCase.KNOWLEDGE_PICK, UseCase.KNOWLEDGE_SUMMARY, UseCase.KNOWLEDGE_ANSWER}),
     "self_fix": frozenset({
         UseCase.SELF_FIX_DESIGN, UseCase.SELF_FIX_IMPLEMENTATION, UseCase.SELF_FIX_REVIEW,
     }),
 }
 
 
-def allowed_use_cases(actor: str) -> frozenset[UseCase]:
-    """actor が通常経路または手動例外で使える use case。"""
-    try:
+def allowed_use_cases(actor: str) -> frozenset[UseCase | str]:
+    """actor が通常経路または手動例外で使える use case。モジュールの実行役は module.toml の [use_cases]。"""
+    if actor in _ACTOR_USE_CASES:
         return _ACTOR_USE_CASES[actor]
-    except KeyError as e:
-        raise ModelPolicyError(f"未知の actor です: {actor}") from e
+    spec = modules.known().get(actor)
+    if spec is None or spec.actor is None:
+        raise ModelPolicyError(f"未知の actor です: {actor}")
+    return frozenset(u.name for u in spec.actor.use_cases)
+
+
+def use_case_of(value: UseCase | str) -> UseCase | str:
+    """用途の名前を、コアの用途（UseCase）か、モジュールの用途（名前の文字列）にする。知らなければ ModelPolicyError。"""
+    try:
+        return UseCase(value)
+    except ValueError:
+        if modules.use_case_owner(str(value)) is not None:
+            return str(value)
+        raise ModelPolicyError(f"未知の use case です: {value}") from None
+
+
+def _recipe(provider: str, use_case: UseCase | str) -> tuple[str, str] | None:
+    """(model, effort)。コアの表か、その用途を持つモジュールの module.toml から。"""
+    if (provider, use_case) in _RECIPES:
+        return _RECIPES[(provider, use_case)]
+    owner = modules.use_case_owner(str(use_case))
+    if owner is None or owner.actor is None:
+        return None
+    spec = next(u for u in owner.actor.use_cases if u.name == use_case)
+    return spec.recipes.get(provider)
+
+
+def check_module_recipes(spec: modules.ModuleSpec) -> None:
+    """モジュールの用途は、コアの用途と名前がぶつからず、モデルはコアの一覧の中にあること（設定を読むときに確かめる）。"""
+    for use_case in spec.actor.use_cases if spec.actor else ():
+        if use_case.name in UseCase.__members__.values():
+            raise ConfigError(f"モジュール「{spec.name}」の用途 {use_case.name} は、コアの用途と同じ名前です")
+        for provider, (model, _effort) in use_case.recipes.items():
+            if not is_allowed_model(provider, model):
+                raise ConfigError(f"モジュール「{spec.name}」の用途 {use_case.name} の {provider} のモデル {model} は使えません"
+                                  f"（使えるのは {', '.join(sorted(ALLOWED_MODELS[provider]))}）")
 
 
 def is_allowed_model(provider: str, model: str) -> bool:
@@ -147,27 +172,24 @@ def is_allowed_model(provider: str, model: str) -> bool:
 
 def resolve(actor: str, provider: str, use_case: UseCase | str, *, manual: bool = False) -> ResolvedModel:
     """選択済み provider の recipe だけを返す。"""
-    if actor not in ACTORS:
+    if actor not in model_actors():
         raise ModelPolicyError(f"未知の actor です: {actor}")
     if provider not in PROVIDERS:
         raise ModelPolicyError(f"provider を選んでください: {actor}")
-    try:
-        case = UseCase(use_case)
-    except ValueError as e:
-        raise ModelPolicyError(f"未知の use case です: {use_case}") from e
+    case = use_case_of(use_case)
     if case not in allowed_use_cases(actor):
-        raise ModelPolicyError(f"{actor} では {case.value} を使えません")
+        raise ModelPolicyError(f"{actor} では {case} を使えません")
     if (provider, case) in _MANUAL:
         if not manual:
-            raise ModelPolicyError(f"{case.value} は依頼者による手動指定だけで使えます")
+            raise ModelPolicyError(f"{case} は依頼者による手動指定だけで使えます")
         model, effort = _MANUAL[(provider, case)]
         if not is_allowed_model(provider, model):
             raise ModelPolicyError(f"許可されていない model です: {model}")
         return ResolvedModel(actor, case, provider, model, effort, manual_only=True)
-    try:
-        model, effort = _RECIPES[(provider, case)]
-    except KeyError as e:
-        raise ModelPolicyError(f"{actor} では {case.value} を使えません") from e
+    found = _recipe(provider, case)
+    if found is None:
+        raise ModelPolicyError(f"{actor} では {case} を {provider} で使えません")
+    model, effort = found
     if not is_allowed_model(provider, model):
         raise ModelPolicyError(f"許可されていない model です: {model}")
     return ResolvedModel(actor, case, provider, model, effort)
@@ -220,4 +242,4 @@ def validate_resolved(recipe: ResolvedModel) -> None:
         except ModelPolicyError as e:
             raise ModelPolicyError(f"許可されない recipe です: {e}") from e
     if expected != recipe:
-        raise ModelPolicyError(f"許可されない recipe です: {recipe.actor}/{recipe.use_case.value}")
+        raise ModelPolicyError(f"許可されない recipe です: {recipe.actor}/{recipe.use_case}")

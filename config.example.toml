@@ -21,6 +21,10 @@ job_parallel = 1
 # （作業がひと段落したときは、回数に関係なく Kei Agent が区切りを勧める）
 handoff_after_turns = 8
 
+# 使うモジュール（機能のまとまり。docs/extensibility.md）。組み込みはリポジトリの modules/、自分のものは
+# ~/.config/kei-agent/modules/ に置く。ここに書いたものだけが動く（書かなければ、組み込みを全部使う）
+modules = ["knowledge"]
+
 # agent ごとの実行器。provider は App Home で明示選択するまで空のままにする。
 # model と effort は用途別の固定方針（src/kei_agent/model_policy.py）、使える道具・連携・Notion の範囲は
 # 制限の表（src/kei_agent/agent_policy.py）で決まり、ここには書かない。
@@ -46,8 +50,8 @@ provider = ""
 [schedule]
 # 決まった時刻の処理（ローカル時刻）。空文字 "" にすると、その処理を行わない
 enabled = true
-literature = "07:00"  # 先行研究の新着（テーマごと。知識の担当が選び、各テーマのチャンネルと先行研究 DB へ）
-reading = "07:00"     # 読みもの（興味のある技術記事。知識の担当が選び、#40_knowledge へ）
+literature = "07:00"  # 先行研究の新着（知識のモジュール。テーマごとに選び、各テーマのチャンネルと先行研究 DB へ）
+reading = "07:00"     # 読みもの（知識のモジュール。興味のある技術記事を #40_knowledge へ）
 daily = "08:00"       # 朝のまとめ（今日の時系列）と Daily（#01_overview）。締切24時間前の知らせは1時間ごと
 review = "21:00"      # Retro & Planning（#01_overview）
 night = "00:00"       # 🌙 をつけた Task
@@ -75,11 +79,11 @@ orchestrator = "http://127.0.0.1:8786"
 
 [a2a.agents]
 # ほかのエージェントの住所（docs/architecture.md の「振り分けと A2A」）。名前は launchd・ログ・秘密情報ファイル・ポートと同じ呼び名。
-# 行を消すと、そのエージェントは使わない（research を消すと、claude は本体の中で動く）
+# 行を消すと、そのエージェントは使わない（research を消すと、claude は本体の中で動く）。
+# 担当プロセスを持つモジュール（知識など）は、書かなければ module.toml の番地を使う
 course = "http://127.0.0.1:8787"
 research = "http://127.0.0.1:8788"
 work = "http://127.0.0.1:8789"
-knowledge = "http://127.0.0.1:8792"
 voice = "http://127.0.0.1:8790"
 
 [notion]

@@ -105,6 +105,7 @@ def test_config_reads_the_knowledge_channel_and_reading_time(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[channels]\nknowledge = ["knowledge", "reading"]\n\n[schedule]\nreading = "06:30"\n')
     config = load_config(path, env={})
-    assert config.knowledge_channels == ("knowledge", "reading")
-    assert config.schedule.reading == "06:30"
+    assert config.module_channels["knowledge"] == ("knowledge", "reading")
+    assert config.schedule.module_times["reading"] == "06:30"
+    assert config.schedule.module_times["literature"] == "07:00"          # 書かなければ module.toml の既定
     assert "research-strategy" not in config.overview_channels

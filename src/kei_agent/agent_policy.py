@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from kei_agent import modules
 from kei_agent.model_policy import UseCase
 
 # Notion ゲートウェイの MCP の名前（全エージェント共通）。どのホームに届くかは、合言葉でゲートウェイが決める
@@ -128,27 +129,39 @@ POLICIES: dict[str, AgentPolicy] = {
     # 振り分け・分類・Daily/レトプラ。材料はプロンプトで渡すので、読むだけで道具も持たない
     "router": AgentPolicy("router", "system.md", plugin=False, files="read", shell=False, web=False,
                           notion="none"),
-    # 知識（読みもの・論文の新着・その質問）。外の記事を読むので、Notion・コマンド・手元のファイルは持たない。
-    # Web を使うのは質問に答えるときだけ（朝の選別と要約は OFFLINE_USE_CASES で Web を切る）
-    "knowledge": AgentPolicy("knowledge", "knowledge.md", plugin=False, files="none", shell=False, web=True,
-                             notion="none", timeout_minutes=10),
     # 自己改善。書けるのは一時ディレクトリか worktree の中だけ（作業場で決まる）
     "self_fix": AgentPolicy("self_fix", "system.md", plugin=False, files="write", shell=True, web=True,
                             notion="none"),
 }
 
 
-# 材料をプロンプトで渡す用途。外の文（記事・論文の要旨）を読むが、外には出られない回にする
-# （外の文・個人の情報・外への出口の3つを1つの回に揃えない。docs/architecture.md の「知識」）
-OFFLINE_USE_CASES = frozenset({UseCase.KNOWLEDGE_PICK, UseCase.KNOWLEDGE_SUMMARY})
+def module_policy(spec: modules.ModuleSpec) -> AgentPolicy:
+    """モジュールの実行役の制限（module.toml の [actor]）。連携の道具は、枠の版 1 ではまだ持てない。"""
+    assert spec.actor is not None
+    actor = spec.actor
+    return AgentPolicy(spec.name, actor.prompt, plugin=actor.plugin, files=actor.files, shell=actor.shell,
+                       web=actor.web, notion=actor.notion, timeout_minutes=actor.timeout_minutes)
 
 
-def policy_of(actor: str, use_case: UseCase | None = None, *, read_only: bool = False) -> AgentPolicy:
+def is_offline(use_case: UseCase | str | None) -> bool:
+    """Web を使わない用途か（module.toml の offline = true）。
+
+    材料をプロンプトで渡す用途では、外の文（記事・論文の要旨）を読むが、外には出られない回にする
+    （外の文・個人の情報・外への出口の3つを1つの回に揃えない。docs/architecture.md の「知識」）。
+    """
+    owner = modules.use_case_owner(str(use_case)) if use_case else None
+    return bool(owner and owner.actor and any(u.name == use_case and u.offline for u in owner.actor.use_cases))
+
+
+def policy_of(actor: str, use_case: UseCase | str | None = None, *, read_only: bool = False) -> AgentPolicy:
     """実行の制限。振り分け・分類の用途は、どの担当のものでも道具を持たない router にする。"""
     name = "router" if use_case is UseCase.ROUTING or actor == "router" else actor
-    try:
+    spec = modules.known().get(name)
+    if name in POLICIES:
         policy = POLICIES[name]
-    except KeyError:
-        raise ValueError(f"未知のagentです: {actor}") from None
+    elif spec is not None and spec.actor is not None:
+        policy = module_policy(spec)
+    else:
+        raise ValueError(f"未知のagentです: {actor}")
     policy = policy.narrowed(read_only or name == "router")
-    return replace(policy, web=False) if use_case in OFFLINE_USE_CASES else policy
+    return replace(policy, web=False) if is_offline(use_case) else policy

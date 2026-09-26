@@ -10,22 +10,44 @@ from __future__ import annotations
 import re
 import sqlite3
 
-from kei_agent.config import HHMM, MODEL_ACTORS, AgentProfile, Config
+from kei_agent import modules
+from kei_agent.config import HHMM, AgentProfile, Config, model_actors
 from kei_agent.guard import valid_domain
 from kei_agent.store import Store
 
 # Claude がつながらなかったときに、返答の最後に書く行（prompts/system.md）
 CONNECT_MARKER = "🔒 接続:"
 
-SCHEDULE_NAMES = ("literature", "reading", "daily", "review", "night", "maintenance")
-SCHEDULE_LABELS = {
-    "literature": "先行研究の新着",
-    "reading": "読みもの",
-    "daily": "Daily",
-    "review": "Retro & Planning",
-    "night": "🌙 をつけた Task",
-    "maintenance": "保守とバックアップ",
+# 本体の定期処理（名前 → 見出し、App Home の短い名前）。モジュールのものは module.toml の [schedules] から足す
+CORE_SCHEDULES = {
+    "daily": ("Daily", "Daily"),
+    "review": ("Retro & Planning", "レトプラ"),
+    "night": ("🌙 をつけた Task", "夜間"),
+    "maintenance": ("保守とバックアップ", "保守"),
 }
+
+
+def module_schedules(config: Config) -> list[modules.ScheduleSpec]:
+    """使うモジュールの定期処理（設定の modules の順）。"""
+    return [s for spec in modules.enabled(config.modules) for s in spec.schedules]
+
+
+def schedule_names(config: Config) -> tuple[str, ...]:
+    """App Home で扱う定期処理（モジュールのものを先に。朝の読みものなどは Daily より前に並べる）。"""
+    return (*(s.name for s in module_schedules(config)), *CORE_SCHEDULES)
+
+
+def schedule_label(config: Config, name: str, short: bool = False) -> str:
+    """定期処理の見出し（short なら App Home のチェックに出す短い名前）。"""
+    if name in CORE_SCHEDULES:
+        return CORE_SCHEDULES[name][1 if short else 0]
+    spec = next((s for s in module_schedules(config) if s.name == name), None)
+    return (spec.short if short else spec.label) if spec else name
+
+
+def _known_schedule(name: str) -> bool:
+    """本体か、知っているどれかのモジュールの定期処理か（Slack のボタンから届いた名前を確かめる）。"""
+    return name in CORE_SCHEDULES or any(s.name == name for spec in modules.known().values() for s in spec.schedules)
 
 _REQUEST = re.compile(rf"^{re.escape(CONNECT_MARKER)}\s*(\S+?)\s*(?:[（(](.*?)[）)])?\s*$")
 
@@ -106,6 +128,8 @@ def _set(store: Store, key: str, value: str) -> None:
 def _config_time(config: Config, name: str) -> str:
     if name == "maintenance":
         return config.maintenance.time
+    if name in config.schedule.module_times:
+        return config.schedule.module_times[name]
     return getattr(config.schedule, name)
 
 
@@ -127,7 +151,7 @@ def schedule_time(config: Config, store: Store, name: str) -> str:
 
 
 def set_schedule(store: Store, name: str, hhmm: str, enabled: bool) -> None:
-    if name not in SCHEDULE_NAMES:
+    if not _known_schedule(name):
         raise ValueError(f"知らない処理です: {name}")
     if not HHMM.match(hhmm):
         raise ValueError(f"時刻は HH:MM で指定してください: {hhmm}")
@@ -173,7 +197,7 @@ _PROFILE_PROVIDERS = frozenset({"claude", "codex"})
 
 def set_agent_provider(store: Store, agent: str, provider: str) -> None:
     """実行器を切り替える。model / effort は保存しない。"""
-    if agent not in MODEL_ACTORS:
+    if agent not in model_actors():
         raise ValueError(f"未知のagentです: {agent}")
     if provider not in _PROFILE_PROVIDERS:
         raise ValueError("provider は claude または codex にしてください")
@@ -182,12 +206,12 @@ def set_agent_provider(store: Store, agent: str, provider: str) -> None:
 
 def selected_provider(config: Config, store: Store, actor: str) -> str:
     """actor が明示選択した provider。空なら実行しない。"""
-    if actor not in MODEL_ACTORS:
+    if actor not in model_actors():
         raise ValueError(f"未知のagentです: {actor}")
     return _get(store, f"agent.{actor}.provider") or config.agent_profiles[actor].provider
 
 
 def agent_profile(config: Config, store: Store, agent: str) -> AgentProfile:
-    if agent not in MODEL_ACTORS:
+    if agent not in model_actors():
         raise ValueError(f"未知のagentです: {agent}")
     return AgentProfile(provider=selected_provider(config, store, agent))

@@ -14,6 +14,7 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+from kei_agent import modules
 from kei_agent.guard import DEFAULT_DENY_READ
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -28,8 +29,13 @@ HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 # skill を持つエージェント（`plugin/<agent>/`）。声やルーターには skill を渡さない
 AGENT_PLUGINS = frozenset({"research", "course", "work"})
-# provider を選ぶ実行役。router は Daily/Retro の横断的な計画も担う。knowledge は読みものと論文の新着の担当
-MODEL_ACTORS = AGENT_PLUGINS | frozenset({"router", "self_fix", "knowledge"})
+# 本体が持つ実行役。router は Daily/Retro の横断的な計画も担う。モジュールの実行役は module.toml の [actor] から足す
+CORE_ACTORS = AGENT_PLUGINS | frozenset({"router", "self_fix"})
+
+
+def model_actors() -> frozenset[str]:
+    """provider を選ぶ実行役。コアのものと、知っているモジュール（組み込みと利用者のもの）のもの。"""
+    return CORE_ACTORS | frozenset(name for name, spec in modules.known().items() if spec.actor)
 
 
 @dataclass(frozen=True)
@@ -45,7 +51,20 @@ class AgentProfile:
 
 
 def _default_agent_profiles() -> dict[str, AgentProfile]:
-    return {agent: AgentProfile() for agent in MODEL_ACTORS}
+    return {agent: AgentProfile() for agent in model_actors()}
+
+
+def _default_modules() -> tuple[str, ...]:
+    """設定に modules を書かなければ、組み込みのモジュールを全部使う。"""
+    return tuple(modules.builtin())
+
+
+def _default_module_channels() -> dict[str, tuple[str, ...]]:
+    return {kind: names for spec in modules.builtin().values() for kind, names in spec.channels.items()}
+
+
+def _default_module_times() -> dict[str, str]:
+    return {s.name: s.default for spec in modules.builtin().values() for s in spec.schedules}
 
 
 def _expand(path: str) -> Path:
@@ -68,9 +87,6 @@ def path_without_venv(path: str, repo_root: Path) -> str:
 class ScheduleConfig:
     enabled: bool = True
     # "HH:MM"（ローカル時刻）。空文字にするとその処理を行わない
-    literature: str = "07:00"
-    # 読みもの（興味のある技術記事。知識の担当）
-    reading: str = "07:00"
     daily: str = "08:00"
     review: str = "21:00"
     night: str = "00:00"
@@ -79,6 +95,8 @@ class ScheduleConfig:
     night_max_tasks: int = 5
     stall_days: int = 3
     unanswered_hours: int = 24
+    # モジュールの定期処理の時刻（名前 → HH:MM。書かなければ module.toml の既定）
+    module_times: dict[str, str] = field(default_factory=_default_module_times)
 
 
 @dataclass(frozen=True)
@@ -150,8 +168,9 @@ class Config:
     course_channels: tuple[str, ...] = ("course",)
     # 仕事エージェントに取り次ぐチャンネル
     work_channels: tuple[str, ...] = ("work",)
-    # 知識（読みもの・論文の新着・その質問）。依頼は知識エージェント（A2A）に取り次ぐ
-    knowledge_channels: tuple[str, ...] = ("knowledge",)
+    # 使うモジュール（設定の modules）と、そのチャンネル（種類 → 番号を外した名前）
+    modules: tuple[str, ...] = field(default_factory=_default_modules)
+    module_channels: dict[str, tuple[str, ...]] = field(default_factory=_default_module_channels)
     max_concurrent_runs: int = 2
     run_timeout_minutes: int = 30
     job_poll_seconds: int = 60
@@ -246,14 +265,14 @@ class ConfigError(ValueError):
 TOP_LEVEL_KEYS = {
     "research_root", "agent_root", "course_root", "state_dir", "max_concurrent_runs", "run_timeout_minutes",
     "job_poll_seconds", "job_parallel", "agents", "handoff_after_turns", "channels", "sandbox",
-    "schedule", "maintenance", "a2a", "notion", "paths",
+    "schedule", "maintenance", "a2a", "notion", "paths", "modules",
 }
 PATHS_KEYS = {"secrets"}
-AGENTS_KEYS = MODEL_ACTORS
 AGENT_PROFILE_KEYS = {"provider"}
-CHANNELS_KEYS = {"overview", "improve", "course", "work", "knowledge"}
-# [schedule] のうち、時刻（HH:MM）を書くキー
-SCHEDULE_TIME_KEYS = ("literature", "reading", "daily", "review", "night")
+# 本体が持つチャンネルの種類（モジュールの種類は module.toml の [channels] から足す）
+CHANNELS_KEYS = {"overview", "improve", "course", "work"}
+# [schedule] のうち、時刻（HH:MM）を書くキー（モジュールの定期処理は module.toml の [schedules] から足す）
+SCHEDULE_TIME_KEYS = ("daily", "review", "night")
 SANDBOX_KEYS = {"allowed_domains", "allow_write", "deny_read"}
 
 
@@ -273,13 +292,21 @@ def _section(cls, data: dict, name: str):
     return cls(**data)
 
 
-def _check_times(schedule: dict, maintenance: dict) -> None:
+def _schedule(data: dict, module_schedules: list[modules.ScheduleSpec]) -> ScheduleConfig:
+    """[schedule] を読む。モジュールの定期処理の時刻は、書かなければ module.toml の既定。"""
+    names = {s.name for s in module_schedules}
+    core = {k: v for k, v in data.items() if k not in names}
+    _check_keys(core, {f.name for f in fields(ScheduleConfig)} - {"module_times"}, "[schedule]")
+    return ScheduleConfig(**core, module_times={s.name: str(data.get(s.name, s.default)) for s in module_schedules})
+
+
+def _check_times(schedule: dict, maintenance: dict, extra: tuple[str, ...] = ()) -> None:
     """決まった時刻の書き間違いを、黙って「行わない」にしない。
 
     `daily = "8:00"` のように書くと、時刻として読めないので処理が動かなくなる。空文字だけが
-    「行わない」の意味なので、それ以外の読めない形は、起動のときに断る。
+    「行わない」の意味なので、それ以外の読めない形は、起動のときに断る。extra はモジュールの定期処理の名前。
     """
-    times = [(f"[schedule] {name}", schedule[name]) for name in SCHEDULE_TIME_KEYS if name in schedule]
+    times = [(f"[schedule] {name}", schedule[name]) for name in (*SCHEDULE_TIME_KEYS, *extra) if name in schedule]
     if "time" in maintenance:
         times.append(("[maintenance] time", maintenance["time"]))
     for where, value in times:
@@ -288,8 +315,9 @@ def _check_times(schedule: dict, maintenance: dict) -> None:
                 f"config.toml の {where} は HH:MM か、空文字（行わない）にしてください: {value!r}")
 
 
-def _a2a(data: dict) -> A2AConfig:
-    """[a2a] と、その下の [a2a.agents]（名前 = 住所）を読む。"""
+def _a2a(data: dict, enabled: list[modules.ModuleSpec]) -> A2AConfig:
+    """[a2a] と、その下の [a2a.agents]（名前 = 住所）を読む。担当プロセスを持つモジュールは、書かなければ
+    module.toml の番地（127.0.0.1）を使う。"""
     _check_keys(data, {"agents", "timeout_seconds", "orchestrator"}, "[a2a]")
     agents = data.get("agents", {})
     if not isinstance(agents, dict) or any(not isinstance(v, str) for v in agents.values()):
@@ -297,15 +325,42 @@ def _a2a(data: dict) -> A2AConfig:
     orchestrator = data.get("orchestrator", "")
     if not isinstance(orchestrator, str):
         raise ConfigError("config.toml の [a2a] orchestrator は住所の文字列で書いてください")
-    return A2AConfig(agents=dict(agents), timeout_seconds=float(data.get("timeout_seconds", 300)),
+    defaults = {spec.name: f"http://127.0.0.1:{spec.port}" for spec in enabled if spec.port}
+    return A2AConfig(agents={**defaults, **agents}, timeout_seconds=float(data.get("timeout_seconds", 300)),
                      orchestrator=orchestrator)
+
+
+def _enabled_modules(data: dict, home: Path) -> list[modules.ModuleSpec]:
+    """設定の modules（書かなければ組み込み全部）を、知っているモジュールから選ぶ。利用者のモジュールもここで読む。"""
+    try:
+        modules.register_user_modules(home / "modules")
+    except modules.ModuleError as e:
+        raise ConfigError(str(e)) from None
+    known = modules.known()
+    names = data.get("modules", list(modules.builtin()))
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise ConfigError("config.toml の modules は、モジュールの名前の配列にしてください（例: modules = [\"knowledge\"]）")
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise ConfigError(f"config.toml の modules に知らないモジュールがあります: {', '.join(unknown)}"
+                          f"（知っているもの: {', '.join(sorted(known)) or 'なし'}）")
+    enabled = [known[n] for n in dict.fromkeys(names)]
+    for spec in enabled:
+        missing = [r for r in spec.requires if r not in names]
+        if missing:
+            raise ConfigError(f"モジュール「{spec.name}」には {', '.join(missing)} が要ります（config.toml の modules に足してください）")
+    # 使ってよいモデルの一覧はコアにある（model_policy）。読み込みの順番のため、ここで読む
+    from kei_agent.model_policy import check_module_recipes
+    for spec in enabled:
+        check_module_recipes(spec)
+    return enabled
 
 
 def _agent_profiles(data: dict) -> dict[str, AgentProfile]:
     """[agents.<name>] を読み、未指定の actor は provider 未選択にする。"""
     if not isinstance(data, dict):
         raise ConfigError("config.toml の [agents] はテーブルにしてください")
-    unknown = sorted(set(data) - AGENTS_KEYS)
+    unknown = sorted(set(data) - model_actors())
     if unknown:
         raise ConfigError(f"config.toml の [agents] に知らないagentがあります: {', '.join(unknown)}")
     profiles = _default_agent_profiles()
@@ -346,11 +401,13 @@ def load_config(path: Path | None = None, env: dict[str, str] | None = None) -> 
     channels = data.get("channels", {})
     sandbox = data.get("sandbox", {})
     _check_keys(data, TOP_LEVEL_KEYS, "一番外側")
-    _check_keys(channels, CHANNELS_KEYS, "[channels]")
+    enabled = _enabled_modules(data, home)
+    _check_keys(channels, CHANNELS_KEYS | {kind for spec in enabled for kind in spec.channels}, "[channels]")
     _check_keys(sandbox, SANDBOX_KEYS, "[sandbox]")
     paths = data.get("paths", {})
     _check_keys(paths, PATHS_KEYS, "[paths]")
-    _check_times(schedule, data.get("maintenance", {}))
+    module_schedules = [s for spec in enabled for s in spec.schedules]
+    _check_times(schedule, data.get("maintenance", {}), tuple(s.name for s in module_schedules))
     state_dir = _expand(data.get("state_dir", "~/.local/state/kei-agent"))
     secrets_dir = _expand(paths.get("secrets", str(home / "secrets")))
     # 既定の読ませない場所には、使うたびに更新するトークン（Box など）の置き場も足す。
@@ -369,7 +426,9 @@ def load_config(path: Path | None = None, env: dict[str, str] | None = None) -> 
         improve_channels=tuple(channels.get("improve", Config.improve_channels)),
         course_channels=tuple(channels.get("course", Config.course_channels)),
         work_channels=tuple(channels.get("work", Config.work_channels)),
-        knowledge_channels=tuple(channels.get("knowledge", Config.knowledge_channels)),
+        modules=tuple(spec.name for spec in enabled),
+        module_channels={kind: tuple(channels.get(kind, names)) for spec in enabled
+                         for kind, names in spec.channels.items()},
         max_concurrent_runs=int(data.get("max_concurrent_runs", 2)),
         run_timeout_minutes=int(data.get("run_timeout_minutes", 30)),
         job_poll_seconds=int(data.get("job_poll_seconds", 60)),
@@ -382,9 +441,9 @@ def load_config(path: Path | None = None, env: dict[str, str] | None = None) -> 
         claude_bin=env.get("KEI_AGENT_CLAUDE_BIN", "claude"),
         codex_bin=env.get("KEI_AGENT_CODEX_BIN", "codex"),
         pueue_bin=env.get("KEI_AGENT_PUEUE_BIN", "pueue"),
-        schedule=_section(ScheduleConfig, schedule, "schedule"),
+        schedule=_schedule(schedule, module_schedules),
         maintenance=_section(MaintenanceConfig, data.get("maintenance", {}), "maintenance"),
-        a2a=_a2a(data.get("a2a", {})),
+        a2a=_a2a(data.get("a2a", {}), enabled),
         notion=_notion(data.get("notion", {})),
         a2a_token=env.get("KEI_AGENT_A2A_TOKEN", ""),
         user_dir=home,

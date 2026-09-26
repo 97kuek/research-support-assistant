@@ -155,11 +155,11 @@ async def test_each_classifier_runs_in_its_own_directory(config, store, monkeypa
 
 def test_every_actor_use_case_has_a_recipe_on_both_providers():
     """Claude でも Codex でも同じ担当が動く（知識の担当を足したときに、片方だけ忘れないように）。"""
-    from kei_agent.config import MODEL_ACTORS
+    from kei_agent.config import model_actors
     from kei_agent.model_policy import allowed_use_cases
     from kei_agent.research import is_manual_use_case
 
-    for actor in MODEL_ACTORS:
+    for actor in model_actors():
         for use_case in allowed_use_cases(actor):
             if is_manual_use_case(use_case):
                 continue

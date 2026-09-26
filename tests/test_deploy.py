@@ -160,6 +160,8 @@ def _run_agent(home: Path, *args: str, common: str | None = "", own: dict[str, s
     uv.chmod(0o755)
     repo = home / "repo"
     shutil.copytree(DEPLOY, repo / "deploy", dirs_exist_ok=True)
+    # 担当プロセスを持つモジュール（知識など）は、modules/ の module.toml から見つける
+    shutil.copytree(REPO_ROOT / "modules", repo / "modules", dirs_exist_ok=True)
     venv_bin = repo / ".venv" / "bin"
     venv_bin.mkdir(parents=True, exist_ok=True)
     for name in AGENTS:
@@ -265,6 +267,7 @@ def _update_repo(home: Path, branch: str = "main") -> Path:
     """deploy/ の写しを入れた git リポジトリ（本番の checkout の代わり）と、偽の uv・launchctl・python。"""
     repo = home / "repo"
     shutil.copytree(DEPLOY, repo / "deploy")
+    shutil.copytree(REPO_ROOT / "modules", repo / "modules")
     git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com"]
     subprocess.run([*git, "init", "-q", "-b", branch], check=True)
     subprocess.run([*git, "add", "-A"], check=True)

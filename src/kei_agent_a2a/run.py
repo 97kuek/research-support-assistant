@@ -23,7 +23,7 @@ from kei_agent import runner
 from kei_agent.agents import FIELDS as RESULT_FIELDS
 from kei_agent.config import Config
 from kei_agent.model_classifier import classify
-from kei_agent.model_policy import ResolvedModel, UseCase, resolve, resolve_selected
+from kei_agent.model_policy import ResolvedModel, resolve, resolve_selected, use_case_of
 from kei_agent.research import is_manual_use_case
 from kei_agent.themes import Workspace
 from kei_agent_a2a import envelope
@@ -53,7 +53,7 @@ async def recipe_for(config: Config, store, agent: str, ask: dict) -> ResolvedMo
     """
     provider = str(ask.get("provider") or "")
     if ask.get("use_case"):
-        use_case = UseCase(str(ask["use_case"]))
+        use_case = use_case_of(str(ask["use_case"]))
     else:
         use_case = await classify(config, store, agent, str(ask["prompt"]), provider=provider or None)
     manual = is_manual_use_case(use_case)

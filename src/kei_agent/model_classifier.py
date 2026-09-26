@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kei_agent import runner
+from kei_agent import modules, runner
 from kei_agent.config import Config
 from kei_agent.model_json import json_object
 from kei_agent.model_policy import ModelPolicyError, UseCase, resolve_classifier
@@ -64,18 +64,19 @@ async def classify_work(config: Config, store, prompt: str, *, provider: str | N
                            "優先順位・会議準備・論点整理は decide。", provider=provider)
 
 
-async def classify_knowledge(config: Config, store, prompt: str, *, provider: str | None = None) -> UseCase:
-    """知識の担当への自由な質問は、用途が1つだけ（分類器を動かさない）。"""
-    return UseCase.KNOWLEDGE_ANSWER
+CLASSIFIERS = {"research": classify_research, "course": classify_course, "work": classify_work}
 
 
-CLASSIFIERS = {"research": classify_research, "course": classify_course, "work": classify_work,
-               "knowledge": classify_knowledge}
-
-
-async def classify(config: Config, store, actor: str, prompt: str, *, provider: str | None = None) -> UseCase:
-    """担当の用途を分類する（研究・大学・仕事で同じ呼び方）。"""
-    return await CLASSIFIERS[actor](config, store, prompt, provider=provider)
+async def classify(config: Config, store, actor: str, prompt: str, *,
+                   provider: str | None = None) -> UseCase | str:
+    """担当の用途を分類する（研究・大学・仕事で同じ呼び方）。モジュールの実行役は、分類器を動かさずに
+    module.toml の default_use_case にする。"""
+    if actor in CLASSIFIERS:
+        return await CLASSIFIERS[actor](config, store, prompt, provider=provider)
+    spec = modules.known().get(actor)
+    if spec is None or spec.actor is None:
+        raise KeyError(actor)
+    return spec.actor.default_use_case
 
 
 async def _classify(config: Config, store, actor: str, prompt: str, allowed: frozenset[UseCase],

@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from fakes import FakeGitHub
 
-from kei_agent import improve, issues, model_classifier, research
-from kei_agent.config import MODEL_ACTORS, REPO_ROOT, AgentProfile, Config
+from kei_agent import improve, issues, model_classifier, modules, research
+from kei_agent.config import REPO_ROOT, AgentProfile, Config, model_actors
 from kei_agent.store import Store
 
 # 開発機のシェルには本物の秘密情報が入っている。テストから Toggl・Notion・Slack などに届かないよう、
@@ -35,6 +35,12 @@ def no_real_restarts(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_user_modules(monkeypatch):
+    """利用者のモジュールは、テストごとに空から始める（読んだものがほかのテストに残らない）。"""
+    monkeypatch.setattr(modules, "_user", {})
+
+
+@pytest.fixture(autouse=True)
 def kei_agent_home(no_real_secrets, tmp_path_factory, monkeypatch):
     """利用者のフォルダ（~/.config/kei-agent）は、テストごとに空の設定だけのものにする（開発機の本物を読まない）。"""
     home = tmp_path_factory.mktemp("kei-agent-home")
@@ -56,7 +62,7 @@ def config(tmp_path: Path) -> Config:
         allow_write=(tmp_path / "cache",),
         deny_read=(tmp_path / "secrets",),
         # 個別の unit test は既存経路の振る舞いを検証する。製品の config.toml は未選択で始まる。
-        agent_profiles={name: AgentProfile(provider="claude") for name in MODEL_ACTORS},
+        agent_profiles={name: AgentProfile(provider="claude") for name in model_actors()},
     )
 
 

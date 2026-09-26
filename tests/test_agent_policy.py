@@ -3,12 +3,14 @@
 import pytest
 
 from kei_agent.agent_policy import NOTION_READ_TOOLS, POLICIES, policy_of
-from kei_agent.config import MODEL_ACTORS
+from kei_agent.config import model_actors
 from kei_agent.model_policy import UseCase
 
 
 def test_every_actor_has_one_policy():
-    assert set(POLICIES) == set(MODEL_ACTORS)
+    """本体の実行役は表に、モジュールの実行役は module.toml の [actor] から、どれも1つの制限を持つ。"""
+    assert set(POLICIES) <= set(model_actors())
+    assert all(policy_of(actor).name == actor for actor in model_actors())
 
 
 def test_course_reads_box_and_writes_notion_only_through_the_gateway():
