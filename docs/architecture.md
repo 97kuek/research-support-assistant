@@ -37,6 +37,7 @@ Kei Agent のいまの作り。使い方は [`using.md`](using.md)、入れ方�
 ├── config.toml           設定の本体（リポジトリには config.example.toml だけ）
 ├── profile.md            話し方・所属・興味。会話する担当の指示書の最後に差し込む（例は profile.example.md）
 ├── prompts/              指示書の差し替え（prompts/ と同じ名前なら、そちらを使う）
+├── modules/              自分のモジュール（<名前>/module.toml。組み込みのリポジトリ直下の modules/ と同じ形）
 └── secrets/              秘密情報（[paths] secrets で変えられる。AI には読ませない）
 ```
 
@@ -103,7 +104,7 @@ Kei Agent のいまの作り。使い方は [`using.md`](using.md)、入れ方�
 ## 5. provider とモデル
 
 - 各 actor（`research` / `course` / `work` / `knowledge` / `router` / `self_fix`）ごとに、App Home で Claude か Codex を選ぶ。既定はなく、選ぶまで動かない（`config.toml` の `[agents.<actor>]` は `provider` だけ）
-- model と effort は `src/kei_agent/model_policy.py` が actor・用途（use case）・provider から決める。ここが唯一の正
+- model と effort は actor・用途（use case）・provider から決める。本体の用途は `src/kei_agent/model_policy.py`、モジュールの用途は `module.toml` の `[use_cases]`（知識は `modules/knowledge/module.toml`）。使ってよいモデルの一覧は `model_policy.py` にだけ置き、モジュールはその中からしか選べない
 - 許可する model は Codex が `gpt-6-luna` / `gpt-6-sol` / `gpt-6-astra`、Claude が `claude-haiku-4-5` / `claude-sonnet-5` / `claude-opus-5` / `claude-fable-5` だけ
 - 別 provider や上位 model への自動の切り替えはしない。provider 未選択、連携が使えない、上限到達のときは理由を出して止まる
 
@@ -139,7 +140,7 @@ AI を起動するのは `src/kei_agent/runner.py` の `run_model` だけ（研�
 | 自己改善 | 作業場を読み書き | ○ | ○ | なし | なし |
 
 - 読むだけの実行（声からの問い合わせ、分類など）は、書く・動かす手段を外す。ゲートウェイは読む道具（`read` `search` `query`）だけ
-- 外の文（記事・論文）を材料にする用途（`OFFLINE_USE_CASES`: 知識の選ぶ・要約）は、Web も外す。外の文・個人の情報・外への出口の3つを1つの回に揃えない（記事に仕込まれた指示で、手元の情報を外へ送られないように）。知識の担当は Notion もテーマのファイルも持たず、テーマの前提は Web を使えない回にだけ渡す
+- 外の文（記事・論文）を材料にする用途（`module.toml` の `offline = true`。知識の選ぶ・要約）は、Web も外す（`agent_policy.is_offline`）。モジュールの実行役の制限は、`module.toml` の `[actor]` から作る（`agent_policy.module_policy`）。外の文・個人の情報・外への出口の3つを1つの回に揃えない（記事に仕込まれた指示で、手元の情報を外へ送られないように）。知識の担当は Notion もテーマのファイルも持たず、テーマの前提は Web を使えない回にだけ渡す
 - Claude は `claude -p`（stream-json）。表から `--settings` の許可と拒否を作り、`dontAsk` で表にないものは使わせない。アカウントの連携はその担当のプロファイル（`CLAUDE_CONFIG_DIR`）のユーザー設定から読み、ほかの担当はユーザー設定を持ち込まない（`--setting-sources ""`、`--strict-mcp-config`）
 - Codex は `codex exec --json`（一時的な権限 profile `kei_agent_scoped`、`--ignore-user-config`）。アカウントの連携は、表の App の、表に書いた読む道具だけをモデルに見せる（ID は実行のたびに名前から引く）。Web 検索は表で許した担当だけ。Claude の担当が持たない道具（サブエージェント、画像の生成、プラグインの導入）は切り、ファイルを読まない担当からは画像を開く道具も外す。無人で動くので、渡した道具（ゲートウェイと App の読む道具）は呼ぶたびの承認を求めない
 - Codex はファイルや skill をコマンドで読むので、コマンドを持たない担当（大学・仕事）でもシェルだけは残す。書き込み・通信・ホームの下（作業場と skill の置き場のほか）は、権限 profile が止める

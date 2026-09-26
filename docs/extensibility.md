@@ -1,7 +1,7 @@
 # 拡張できる構成（設計）
 
 Kei Agent を、ほかの人が本体（コア）に触らずに、設定と自分のモジュールで作り替えられる形にする設計。
-2026-09-26 に grilling で決めた（Q1〜Q29）。いまの作りは [`architecture.md`](architecture.md)。
+2026-09-26 に grilling で決めた（Q1〜Q33）。いまの作りは [`architecture.md`](architecture.md)。
 
 ## 目標
 
@@ -34,7 +34,54 @@ Kei Agent を、ほかの人が本体（コア）に触らずに、設定と自�
 - 朝の一覧や Daily は、各モジュールが材料を出す形にする（大学なら締切、仕事なら会議）
 - 枠には版を付ける（`api = 1`）。合わない版のモジュールは読み込まず、setup・doctor・起動のときに理由を知らせる。枠を変えるときは版を上げ、変わった点と直し方を CHANGELOG に書く
 - 使うモジュールは設定に並べて、はっきりオンにする（例: `modules = ["research", "knowledge", "my_weather"]`）
-  - 組み込みのモジュールはリポジトリの中、自分のモジュールは自分のフォルダの `modules/` から探す
+  - 組み込みのモジュールはリポジトリ直下の `modules/<名前>/`、自分のモジュールは自分のフォルダの `modules/<名前>/` に置き、どちらも同じ仕組みで読む（組み込みがそのまま作り方の見本になる）
+- Python は `module.py` の `class Module` に、使う差し込み口のメソッドだけを書く（チャンネルへの書き込み、リアクション、朝の一覧に出す行、定期処理ごとの関数、招かれたときの案内など）
+  - コアとのやり取りは、決めた範囲の窓口 `core` だけを通す（投稿する、担当に聞く、保存を読み書きする、Notion を読むなど）。`core` の範囲が、枠の版で約束する中身
+- 担当プロセス（A2A のサーバー）のコードもモジュールのフォルダに入れる（`modules/<名前>/agent.py`）。起動は共通の1つのコマンドが、モジュールの名前を受け取って行う（`src/` や `pyproject.toml` に手を入れずに担当を足せる）
+
+### module.toml の書き方（枠の版 1）
+
+`modules/knowledge/module.toml` が見本。書けるのは次のキーだけで、知らないキーや形の違いは、読むときに断る（`src/kei_agent/modules.py`）。
+
+```toml
+api = 1                         # 枠の版。この Kei Agent と合わなければ読まない
+name = "knowledge"              # フォルダの名前と同じ。英小文字・数字・-
+label = "知識"                  # App Home などに出す名前
+description = "…"
+
+[depends]
+requires = []                   # 必須のモジュール（設定の modules に無ければ断る）
+optional = ["notion"]           # あれば使うモジュール
+
+[actor]                         # AI の実行役（持つなら）。provider は App Home で選ぶ
+prompt = "knowledge.md"         # 指示書（prompts/。利用者のフォルダの prompts/ で差し替えられる）
+files = "none"                  # none / read / write
+shell = false
+web = true
+notion = "none"                 # none / read / write（Notion ゲートウェイ）
+timeout_minutes = 10
+default_use_case = "knowledge_answer"   # 自由な質問の用途（分類器を動かさない）
+
+[use_cases.knowledge_pick]      # 用途ごとのモデル。コアのモデルの一覧の中からだけ選べる
+offline = true                  # Web を使わない回（外の文を材料として渡す回）
+claude = { model = "claude-haiku-4-5" }
+codex = { model = "gpt-6-luna", effort = "low" }
+
+[process]                       # 担当プロセス（持つなら）
+port = 8792                     # 127.0.0.1 のこの番地。設定の [a2a.agents] に書かなければ、ここを使う
+
+[channels]                      # チャンネルの種類 = 既定の名前（番号を外した名前。設定の [channels] で変えられる）
+knowledge = ["knowledge"]
+
+[schedules.reading]             # 定期処理。時刻は設定の [schedule] と App Home で変えられる
+label = "読みもの"
+short = "読みもの"              # App Home のチェックに出す短い名前
+default = "07:00"               # 空文字なら、既定では動かさない
+```
+
+- 用途・定期処理・チャンネルの種類・番地は、モジュールどうしでぶつかってはいけない（ぶつかれば設定を読むときに断る）
+- 同じ時刻なら、夜間の Task → モジュールの定期処理（設定の modules の順）→ Daily → 振り返り → 保守の順に動く
+- 担当プロセスの名前（`deploy/install.sh <名前>` など）は、`[process]` を持つモジュールから起動スクリプトが見つける
 
 ## 設定と置き場所
 
@@ -112,7 +159,7 @@ Kei Agent を、ほかの人が本体（コア）に触らずに、設定と自�
 | 段 | やること | 状態 |
 |---|---|---|
 | 1 | 個人のものを `~/.config/kei-agent/` に出す（設定・プロフィール・指示書の差し替え・秘密情報の場所）。リポジトリには例の設定だけを残す | 済み（2026-09-26） |
-| 2 | モジュールの枠（`module.toml` の読み込み、チャンネル・定期処理・リアクション・App Home・朝の材料の枠、制限の表を定義から作る）。まず知識を載せ替えて形を確かめる | |
+| 2 | モジュールの枠。まず知識を載せ替えて形を確かめる。3つに分けて反映する: ① 定義と読み込み（`module.toml` から、担当の名前・表示名・用途とモデル・制限の表の行・チャンネルと定期処理の既定・担当プロセスの番地を作る）② 差し込み口と `core`（チャンネル・定期処理・リアクション・朝の一覧・招かれたときの案内。知識の本体側を `modules/knowledge/module.py` へ）③ 担当プロセスを `modules/knowledge/agent.py` へ移し、共通の起動コマンドで動かす | ①済み（2026-09-27）、②③はこれから |
 | 3 | 残りを載せ替える（仕事 → 大学（学校の部品化と早稲田）→ 声 → Notion → 研究（テーマの置き場所を含む）→ Daily・振り返り・時間記録・自己改善） | |
 | 4 | `kei-agent setup` / `doctor` / `module add`、Slack の manifest の生成、常駐の登録 | |
 | 5 | README、モジュールの作り方の文書、`kei-agent module new`、`kei_agent.testing`、GitHub Actions | |
